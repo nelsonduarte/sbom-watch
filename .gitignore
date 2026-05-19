@@ -1,3 +1,6 @@
+# Package manager: git deps materialised by `capa install`
+vendor/
+
 # Generated reports (default cwd output)
 risk-report-*.md
 risk-report-*.json
