@@ -1,0 +1,122 @@
+// render.capa
+//
+// Two output formats:
+//   - render_markdown: human-readable report for tickets / wikis
+//   - render_json:     machine-parseable summary for CI gates
+//
+// Both pure functions. The caller writes them through a
+// (write-only attenuated) Fs cap.
+
+import model
+import matcher
+
+// =========================================================
+// Markdown
+// =========================================================
+
+pub fun render_markdown(
+    sbom_path: String,
+    cve_path: String,
+    policy_path: String,
+    generated_at: String,
+    components: List<Component>,
+    findings: List<RiskFinding>,
+    fail_threshold: Severity
+) -> String
+    let summary = summarise(findings)
+    var out = "# SBOM Risk Report\n\n"
+    out = out + "- **SBOM:** ${sbom_path}\n"
+    out = out + "- **CVE database:** ${cve_path}\n"
+    out = out + "- **Policy:** ${policy_path}\n"
+    out = out + "- **Generated:** ${generated_at}\n"
+    out = out + "- **Components scanned:** ${components.length()}\n"
+    out = out + "- **Fail threshold:** ${severity_name(fail_threshold)}\n\n"
+
+    out = out + "## Summary\n\n"
+    out = out + "| Severity | Count |\n"
+    out = out + "|----------|-------|\n"
+    out = out + "| Critical | ${summary.critical} |\n"
+    out = out + "| High     | ${summary.high} |\n"
+    out = out + "| Medium   | ${summary.medium} |\n"
+    out = out + "| Low      | ${summary.low} |\n"
+    out = out + "| Info     | ${summary.info} |\n\n"
+
+    if findings.is_empty()
+        out = out + "_No findings. All components passed every rule._\n"
+        return out
+
+    out = out + render_section("Critical", Critical, findings)
+    out = out + render_section("High", High, findings)
+    out = out + render_section("Medium", Medium, findings)
+    out = out + render_section("Low", Low, findings)
+    out = out + render_section("Info", Info, findings)
+    return out
+
+fun render_section(title: String, level: Severity, findings: List<RiskFinding>) -> String
+    var any = false
+    for f in findings
+        if severity_rank(f.severity) == severity_rank(level)
+            any = true
+            break
+    if not any
+        return ""
+    var out = "## ${title}\n\n"
+    for f in findings
+        if severity_rank(f.severity) != severity_rank(level)
+            continue
+        out = out + "- **[${f.rule}]** `${f.component_name}@${f.component_version}` -> ${f.detail}: ${f.reason}\n"
+    out = out + "\n"
+    return out
+
+// =========================================================
+// JSON summary
+// =========================================================
+
+pub fun render_json(
+    sbom_path: String,
+    cve_path: String,
+    policy_path: String,
+    generated_at: String,
+    components: List<Component>,
+    findings: List<RiskFinding>,
+    fail_threshold: Severity
+) -> String
+    let summary = summarise(findings)
+    var root: Map<String, JsonValue> = new_map()
+    root.set("sbom_path", JStr(sbom_path))
+    root.set("cve_db_path", JStr(cve_path))
+    root.set("policy_path", JStr(policy_path))
+    root.set("generated_at", JStr(generated_at))
+    root.set("components_scanned", JNum(to_float(components.length())))
+    root.set("fail_threshold", JStr(severity_name(fail_threshold)))
+
+    var counts: Map<String, JsonValue> = new_map()
+    counts.set("critical", JNum(to_float(summary.critical)))
+    counts.set("high", JNum(to_float(summary.high)))
+    counts.set("medium", JNum(to_float(summary.medium)))
+    counts.set("low", JNum(to_float(summary.low)))
+    counts.set("info", JNum(to_float(summary.info)))
+    root.set("summary", JObj(counts))
+
+    var arr: List<JsonValue> = []
+    for f in findings
+        var row: Map<String, JsonValue> = new_map()
+        row.set("component", JStr(f.component_name))
+        row.set("version", JStr(f.component_version))
+        row.set("severity", JStr(severity_name(f.severity)))
+        row.set("rule", JStr(f.rule))
+        row.set("detail", JStr(f.detail))
+        row.set("reason", JStr(f.reason))
+        arr.push(JObj(row))
+    root.set("findings", JArr(arr))
+    root.set("failing", JBool(has_failing(findings, fail_threshold)))
+    return to_json(JObj(root))
+
+// =========================================================
+// Write helpers (only thing that touches Fs)
+// =========================================================
+
+pub fun write_text(fs: Fs, path: String, body: String) -> Result<Unit, WatchError>
+    match fs.write(path, body)
+        Ok(_)  -> return Ok(())
+        Err(_) -> return Err(IoFailed("cannot write '${path}'"))

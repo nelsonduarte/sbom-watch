@@ -1,0 +1,126 @@
+// model.capa
+//
+// Shared domain types. Zero capabilities. The vocabulary
+// stays consistent across the parser, matcher, and renderer.
+
+// =========================================================
+// SBOM
+// =========================================================
+
+pub type Component {
+    name: String,
+    version: String,
+    purl: String,
+    license: String       // SPDX id, "" if none reported
+}
+
+// =========================================================
+// Vulnerability database (OSV-style, simplified)
+// =========================================================
+
+pub type Vulnerability {
+    id: String,            // CVE-2020-14343
+    summary: String,
+    severity: Severity,
+    package: String,
+    ecosystem: String,     // "PyPI" | "npm" | ...
+    affected_versions: List<String>,
+    fixed_in: String       // "" if no known fix
+}
+
+// =========================================================
+// Policy
+// =========================================================
+
+pub type LicenseRule {
+    spdx_id: String,
+    severity: Severity,
+    reason: String
+}
+
+pub type BannedPackage {
+    name: String,
+    severity: Severity,
+    reason: String
+}
+
+pub type Policy {
+    license_denylist: List<LicenseRule>,
+    banned_packages: List<BannedPackage>,
+    min_severity_to_fail: Severity
+}
+
+// =========================================================
+// Severity (ordered Info < Low < Medium < High < Critical)
+// =========================================================
+
+pub type Severity =
+    Info
+    Low
+    Medium
+    High
+    Critical
+
+pub fun severity_name(s: Severity) -> String
+    return match s
+        Info     -> "Info"
+        Low      -> "Low"
+        Medium   -> "Medium"
+        High     -> "High"
+        Critical -> "Critical"
+
+pub fun severity_rank(s: Severity) -> Int
+    return match s
+        Info     -> 0
+        Low      -> 1
+        Medium   -> 2
+        High     -> 3
+        Critical -> 4
+
+pub fun parse_severity(s: String) -> Severity
+    if s == "Critical" or s == "critical"
+        return Critical
+    if s == "High" or s == "high"
+        return High
+    if s == "Medium" or s == "medium"
+        return Medium
+    if s == "Low" or s == "low"
+        return Low
+    return Info
+
+pub fun max_severity(a: Severity, b: Severity) -> Severity
+    if severity_rank(a) >= severity_rank(b)
+        return a
+    return b
+
+// =========================================================
+// Findings (one per rule hit)
+// =========================================================
+
+pub type RiskFinding {
+    component_name: String,
+    component_version: String,
+    severity: Severity,
+    rule: String,        // "cve" | "license" | "banned"
+    detail: String,      // CVE id, SPDX id, ...
+    reason: String       // human-readable explanation
+}
+
+// =========================================================
+// Errors + Options
+// =========================================================
+
+pub type WatchError =
+    JsonError(String)
+    IoFailed(String)
+    BadArgs(String)
+    BadSbom(String)
+
+pub type Options {
+    sbom_path: String,
+    cve_db_path: String,
+    policy_path: String,
+    output_dir: String,
+    fail_threshold: Severity,
+    verbose: Bool
+}

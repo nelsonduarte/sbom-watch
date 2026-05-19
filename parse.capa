@@ -1,0 +1,172 @@
+// parse.capa
+//
+// Three JSON parsers, one per input shape:
+//   - parse_sbom:   CycloneDX 1.5 -> List<Component>
+//   - parse_cve_db: OSV-style     -> List<Vulnerability>
+//   - parse_policy: policy spec   -> Policy
+//
+// Each declares [Fs] for the read; the rest is pure JSON
+// traversal on the loaded body.
+
+import model
+
+// =========================================================
+// Generic helpers
+// =========================================================
+
+fun read_json(fs: Fs, path: String) -> Result<JsonValue, WatchError>
+    let body = match fs.read(path)
+        Ok(s)  -> s
+        Err(_) -> return Err(IoFailed("cannot read '${path}'"))
+    match parse_json(body)
+        Ok(v)  -> return Ok(v)
+        Err(e) -> return Err(JsonError("'${path}': ${e}"))
+
+fun get_string(obj: Map<String, JsonValue>, key: String) -> String
+    match obj.get(key)
+        None     -> return ""
+        Some(jv) ->
+            match jv.as_string()
+                Some(s) -> return s
+                None    -> return ""
+
+fun get_array(obj: Map<String, JsonValue>, key: String) -> List<JsonValue>
+    match obj.get(key)
+        None     -> return []
+        Some(jv) ->
+            match jv.as_array()
+                Some(a) -> return a
+                None    -> return []
+
+fun get_object(obj: Map<String, JsonValue>, key: String) -> Map<String, JsonValue>
+    match obj.get(key)
+        None     -> return new_map()
+        Some(jv) ->
+            match jv.as_object()
+                Some(m) -> return m
+                None    -> return new_map()
+
+fun expect_object(jv: JsonValue, what: String) -> Result<Map<String, JsonValue>, WatchError>
+    match jv.as_object()
+        Some(m) -> return Ok(m)
+        None    -> return Err(BadSbom("expected JSON object for '${what}'"))
+
+// =========================================================
+// CycloneDX SBOM -> List<Component>
+// =========================================================
+//
+// Pulls the components[] array. For each component, lifts
+// name, version, purl, and the SPDX id of its first license
+// entry. CycloneDX permits multiple licenses; v1 keeps the
+// first and notes the limitation in the README.
+
+pub fun parse_sbom(fs: Fs, path: String) -> Result<List<Component>, WatchError>
+    let root = read_json(fs, path)?
+    let obj = expect_object(root, "sbom root")?
+    let fmt = get_string(obj, "bomFormat")
+    if fmt != "CycloneDX"
+        return Err(BadSbom("expected bomFormat 'CycloneDX', got '${fmt}'"))
+    var out: List<Component> = []
+    for comp_jv in get_array(obj, "components")
+        let comp = match comp_jv.as_object()
+            Some(m) -> m
+            None    -> return Err(BadSbom("component is not an object"))
+        let name = get_string(comp, "name")
+        let version = get_string(comp, "version")
+        let purl = get_string(comp, "purl")
+        let license = extract_first_license(comp)
+        out.push(Component {
+            name: name,
+            version: version,
+            purl: purl,
+            license: license
+        })
+    return Ok(out)
+
+// licenses[].license.id OR licenses[].license.name. Empty
+// string if no SPDX-style entry was found.
+fun extract_first_license(comp: Map<String, JsonValue>) -> String
+    let lics = get_array(comp, "licenses")
+    for lic_jv in lics
+        let lic = match lic_jv.as_object()
+            Some(m) -> m
+            None    -> new_map()
+        let inner = get_object(lic, "license")
+        let id = get_string(inner, "id")
+        if not id.is_empty()
+            return id
+        let name = get_string(inner, "name")
+        if not name.is_empty()
+            return name
+    return ""
+
+// =========================================================
+// OSV-style CVE DB -> List<Vulnerability>
+// =========================================================
+
+pub fun parse_cve_db(fs: Fs, path: String) -> Result<List<Vulnerability>, WatchError>
+    let root = read_json(fs, path)?
+    let obj = expect_object(root, "cve-db root")?
+    var out: List<Vulnerability> = []
+    for entry_jv in get_array(obj, "entries")
+        let entry = match entry_jv.as_object()
+            Some(m) -> m
+            None    -> return Err(JsonError("cve entry is not an object"))
+        let id = get_string(entry, "id")
+        let summary = get_string(entry, "summary")
+        let sev_str = get_string(entry, "severity")
+        let package = get_string(entry, "package")
+        let ecosystem = get_string(entry, "ecosystem")
+        let fixed_in = get_string(entry, "fixed_in")
+        var versions: List<String> = []
+        for v_jv in get_array(entry, "affected_versions")
+            match v_jv.as_string()
+                Some(s) -> versions.push(s)
+                None    -> ()
+        out.push(Vulnerability {
+            id: id,
+            summary: summary,
+            severity: parse_severity(sev_str),
+            package: package,
+            ecosystem: ecosystem,
+            affected_versions: versions,
+            fixed_in: fixed_in
+        })
+    return Ok(out)
+
+// =========================================================
+// Policy JSON -> Policy
+// =========================================================
+
+pub fun parse_policy(fs: Fs, path: String) -> Result<Policy, WatchError>
+    let root = read_json(fs, path)?
+    let obj = expect_object(root, "policy root")?
+
+    var lic_rules: List<LicenseRule> = []
+    for jv in get_array(obj, "license_denylist")
+        let rule = match jv.as_object()
+            Some(m) -> m
+            None    -> return Err(JsonError("license rule is not an object"))
+        lic_rules.push(LicenseRule {
+            spdx_id: get_string(rule, "spdx_id"),
+            severity: parse_severity(get_string(rule, "severity")),
+            reason: get_string(rule, "reason")
+        })
+
+    var banned: List<BannedPackage> = []
+    for jv in get_array(obj, "banned_packages")
+        let rule = match jv.as_object()
+            Some(m) -> m
+            None    -> return Err(JsonError("banned package entry is not an object"))
+        banned.push(BannedPackage {
+            name: get_string(rule, "name"),
+            severity: parse_severity(get_string(rule, "severity")),
+            reason: get_string(rule, "reason")
+        })
+
+    let min_fail = parse_severity(get_string(obj, "min_severity_to_fail"))
+    return Ok(Policy {
+        license_denylist: lic_rules,
+        banned_packages: banned,
+        min_severity_to_fail: min_fail
+    })

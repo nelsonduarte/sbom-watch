@@ -1,0 +1,12 @@
+{
+  "license_denylist": [
+    {"spdx_id": "GPL-3.0", "severity": "Critical", "reason": "copyleft incompatible with proprietary product license"},
+    {"spdx_id": "AGPL-3.0", "severity": "Critical", "reason": "network-copyleft - prohibited per legal review"},
+    {"spdx_id": "LGPL-3.0", "severity": "High", "reason": "LGPL allowed only via dynamic linking - requires architecture review"}
+  ],
+  "banned_packages": [
+    {"name": "internal-legacy-crypto", "severity": "Critical", "reason": "deprecated; migrate to cryptography>=42.0"},
+    {"name": "leftpad", "severity": "Medium", "reason": "trivial-dependency; inline the function instead"}
+  ],
+  "min_severity_to_fail": "High"
+}

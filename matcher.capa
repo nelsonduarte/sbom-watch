@@ -1,0 +1,138 @@
+// match.capa
+//
+// Cross-references the three input shapes:
+//   - components x cve-db    -> CVE findings
+//   - components x policy    -> license + banned-package findings
+//
+// All functions are pure. They take typed values and emit
+// RiskFinding lists; no I/O, no clock, no logging.
+
+import model
+
+// =========================================================
+// CVE matcher
+// =========================================================
+//
+// For each component, look up vulnerabilities whose package
+// matches the component name AND whose affected_versions
+// contains the component's exact version. The v1 demo uses
+// exact-version matching; OSV's full ranges (introduced /
+// fixed events) are out of scope.
+
+pub fun match_cves(components: List<Component>, vulns: List<Vulnerability>) -> List<RiskFinding>
+    var out: List<RiskFinding> = []
+    for c in components
+        for v in vulns
+            if v.package != c.name
+                continue
+            if not v.affected_versions.contains(c.version)
+                continue
+            let fix_hint = match v.fixed_in.is_empty()
+                true  -> ""
+                false -> ", upgrade to ${v.fixed_in}+"
+            out.push(RiskFinding {
+                component_name: c.name,
+                component_version: c.version,
+                severity: v.severity,
+                rule: "cve",
+                detail: v.id,
+                reason: "${v.summary}${fix_hint}"
+            })
+    return out
+
+// =========================================================
+// License matcher
+// =========================================================
+
+pub fun match_licenses(components: List<Component>, denylist: List<LicenseRule>) -> List<RiskFinding>
+    var out: List<RiskFinding> = []
+    for c in components
+        if c.license.is_empty()
+            continue
+        for rule in denylist
+            if rule.spdx_id != c.license
+                continue
+            out.push(RiskFinding {
+                component_name: c.name,
+                component_version: c.version,
+                severity: rule.severity,
+                rule: "license",
+                detail: rule.spdx_id,
+                reason: "license '${rule.spdx_id}' on denylist: ${rule.reason}"
+            })
+    return out
+
+// =========================================================
+// Banned-package matcher
+// =========================================================
+
+pub fun match_banned(components: List<Component>, banned: List<BannedPackage>) -> List<RiskFinding>
+    var out: List<RiskFinding> = []
+    for c in components
+        for rule in banned
+            if rule.name != c.name
+                continue
+            out.push(RiskFinding {
+                component_name: c.name,
+                component_version: c.version,
+                severity: rule.severity,
+                rule: "banned",
+                detail: rule.name,
+                reason: "banned: ${rule.reason}"
+            })
+    return out
+
+// =========================================================
+// Run everything
+// =========================================================
+
+pub fun run_all(
+    components: List<Component>,
+    vulns: List<Vulnerability>,
+    policy: Policy
+) -> List<RiskFinding>
+    var out: List<RiskFinding> = []
+    for f in match_cves(components, vulns)
+        out.push(f)
+    for f in match_licenses(components, policy.license_denylist)
+        out.push(f)
+    for f in match_banned(components, policy.banned_packages)
+        out.push(f)
+    return out
+
+// =========================================================
+// Severity summary
+// =========================================================
+
+pub type SeveritySummary {
+    critical: Int,
+    high: Int,
+    medium: Int,
+    low: Int,
+    info: Int
+}
+
+pub fun summarise(findings: List<RiskFinding>) -> SeveritySummary
+    var c = 0
+    var h = 0
+    var m = 0
+    var l = 0
+    var i = 0
+    for f in findings
+        match f.severity
+            Critical -> c = c + 1
+            High     -> h = h + 1
+            Medium   -> m = m + 1
+            Low      -> l = l + 1
+            Info     -> i = i + 1
+    return SeveritySummary {
+        critical: c, high: h, medium: m, low: l, info: i
+    }
+
+// Does any finding meet-or-exceed the threshold? Drives the
+// process exit code.
+pub fun has_failing(findings: List<RiskFinding>, threshold: Severity) -> Bool
+    for f in findings
+        if severity_rank(f.severity) >= severity_rank(threshold)
+            return true
+    return false

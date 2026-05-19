@@ -1,0 +1,218 @@
+// watch.capa
+//
+// sbom-watch entry point. Takes three inputs (SBOM, CVE DB,
+// policy), runs the matcher, writes two outputs (markdown +
+// JSON), and exits non-zero if any finding meets or exceeds
+// --fail-threshold.
+//
+// Audit summary (capa --manifest watch.capa):
+//   main:        [Stdio, Fs, Env, Clock]
+//   run:         [Logger, Fs, Fs]    (separate read + write)
+//   parse_*:     [Fs]                 (data/ prefix only)
+//   write_text:  [Fs]                 (output_dir only)
+//   matcher,
+//   renderer,
+//   summarise,
+//   has_failing: pure
+
+import model
+import parse
+import matcher
+import render
+
+import capa_cli.parser
+import capa_datetime.datetime
+import capa_log.log
+import capa_log.stdio_logger
+
+// =========================================================
+// CLI
+// =========================================================
+
+fun build_schema() -> ArgSchema
+    var positionals: List<Positional> = []
+    positionals.push(Positional {
+        name: "sbom",
+        help: "path to the CycloneDX SBOM (must live under data/)"
+    })
+    var flags: List<Flag> = []
+    flags.push(Flag {
+        long: "verbose", short: "v",
+        help: "enable DEBUG-level logging"
+    })
+    var opts: List<Opt> = []
+    opts.push(Opt {
+        long: "cve-db", short: "c",
+        help: "path to OSV-style CVE DB JSON (default: data/cve-db.json)",
+        required: false
+    })
+    opts.push(Opt {
+        long: "policy", short: "p",
+        help: "path to policy JSON (default: data/policy.json)",
+        required: false
+    })
+    opts.push(Opt {
+        long: "output-dir", short: "o",
+        help: "directory for report files (default: cwd)",
+        required: false
+    })
+    opts.push(Opt {
+        long: "fail-threshold", short: "f",
+        help: "exit non-zero when any finding >= this severity (default: from policy)",
+        required: false
+    })
+    return ArgSchema {
+        program: "sbom-watch",
+        summary: "match an SBOM against a CVE database + policy; emit a risk report",
+        positionals: positionals,
+        flags: flags,
+        options: opts
+    }
+
+fun resolve_options(parsed: ParsedArgs) -> Result<Options, WatchError>
+    let sbom = match parsed.positionals.get("sbom")
+        Some(s) -> s
+        None    -> return Err(BadArgs("missing SBOM path"))
+    let cve = match parsed.options.get("cve-db")
+        Some(s) -> s
+        None    -> "data/cve-db.json"
+    let policy = match parsed.options.get("policy")
+        Some(s) -> s
+        None    -> "data/policy.json"
+    let out_dir = match parsed.options.get("output-dir")
+        Some(s) -> s
+        None    -> "."
+    // fail_threshold is resolved later (after we read the policy)
+    // so a CLI override stays optional. Sentinel "" means "use
+    // policy".
+    let raw_threshold = match parsed.options.get("fail-threshold")
+        Some(s) -> s
+        None    -> ""
+    let verbose = match parsed.flags.get("verbose")
+        Some(b) -> b
+        None    -> false
+    let threshold = match raw_threshold.is_empty()
+        true  -> Info       // sentinel - replaced after policy load
+        false -> parse_severity(raw_threshold)
+    return Ok(Options {
+        sbom_path: sbom,
+        cve_db_path: cve,
+        policy_path: policy,
+        output_dir: out_dir,
+        fail_threshold: threshold,
+        verbose: verbose
+    })
+
+// =========================================================
+// Pipeline
+// =========================================================
+
+fun run(
+    log: Logger,
+    read_fs: Fs,
+    write_fs: Fs,
+    opts: Options,
+    generated_at: String
+) -> Result<Bool, WatchError>
+    log.info("loading SBOM ${opts.sbom_path}")
+    let components = parse_sbom(read_fs, opts.sbom_path)?
+    log.info("loaded ${components.length()} component(s)")
+
+    log.info("loading CVE database ${opts.cve_db_path}")
+    let vulns = parse_cve_db(read_fs, opts.cve_db_path)?
+    log.info("loaded ${vulns.length()} CVE entr(ies)")
+
+    log.info("loading policy ${opts.policy_path}")
+    let policy = parse_policy(read_fs, opts.policy_path)?
+    log.info("policy: ${policy.license_denylist.length()} license rule(s), ${policy.banned_packages.length()} banned package(s)")
+
+    // Resolve the fail threshold: CLI > policy.
+    var threshold = opts.fail_threshold
+    if severity_rank(threshold) == severity_rank(Info)
+        threshold = policy.min_severity_to_fail
+
+    let findings = run_all(components, vulns, policy)
+
+    var idx = 0
+    for f in findings
+        idx = idx + 1
+        log.warn("[${f.rule}] ${f.component_name}@${f.component_version} ${severity_name(f.severity)}: ${f.reason}")
+
+    let summary = summarise(findings)
+    log.info("findings: ${summary.critical} critical, ${summary.high} high, ${summary.medium} medium, ${summary.low} low, ${summary.info} info")
+
+    let md_path = "${opts.output_dir}/risk-report-${generated_at}.md"
+    let json_path = "${opts.output_dir}/risk-report-${generated_at}.json"
+
+    write_text(write_fs, md_path,
+        render_markdown(
+            opts.sbom_path, opts.cve_db_path, opts.policy_path,
+            generated_at, components, findings, threshold
+        ))?
+    log.info("wrote ${md_path}")
+
+    write_text(write_fs, json_path,
+        render_json(
+            opts.sbom_path, opts.cve_db_path, opts.policy_path,
+            generated_at, components, findings, threshold
+        ))?
+    log.info("wrote ${json_path}")
+
+    let failing = has_failing(findings, threshold)
+    if failing
+        log.warn("policy gate FAILED: at least one finding >= ${severity_name(threshold)}")
+    else
+        log.info("policy gate passed: nothing >= ${severity_name(threshold)}")
+    return Ok(failing)
+
+fun describe_error(stdio: Stdio, err: WatchError) -> Unit
+    match err
+        JsonError(msg) -> stdio.eprintln("json error: ${msg}")
+        IoFailed(msg)  -> stdio.eprintln("io error: ${msg}")
+        BadArgs(msg)   -> stdio.eprintln("argument error: ${msg}")
+        BadSbom(msg)   -> stdio.eprintln("sbom error: ${msg}")
+
+fun main(stdio: Stdio, fs: Fs, env: Env, clock: Clock)
+    let schema = build_schema()
+    let raw_args = env.args()
+    let parsed = match parse(schema, raw_args)
+        Ok(p) -> p
+        Err(HelpRequested) ->
+            stdio.println(format_help(schema))
+            return ()
+        Err(Missing(name)) ->
+            stdio.eprintln("error: missing required argument '${name}'")
+            stdio.eprintln("")
+            stdio.eprintln(format_help(schema))
+            return ()
+        Err(Unknown(arg)) ->
+            stdio.eprintln("error: unrecognised argument '${arg}'")
+            return ()
+        Err(NeedsValue(name)) ->
+            stdio.eprintln("error: option '${name}' needs a value")
+            return ()
+
+    let opts = match resolve_options(parsed)
+        Ok(o)  -> o
+        Err(e) ->
+            describe_error(stdio, e)
+            return ()
+
+    let min_level = match opts.verbose
+        true  -> DEBUG
+        false -> INFO
+    let log = make_stdio_logger(stdio, min_level)
+
+    // Attenuation: split Fs into read (data/) + write (output_dir).
+    let read_fs = fs.restrict_to("data/")
+    let write_fs = fs.restrict_to(opts.output_dir)
+
+    let generated_at = format_date(clock.now_secs())
+
+    match run(log, read_fs, write_fs, opts, generated_at)
+        Ok(failing) ->
+            if failing
+                stdio.eprintln("sbom-watch: FAILING")
+            else
+                stdio.println("sbom-watch: success")
+        Err(e) -> describe_error(stdio, e)
