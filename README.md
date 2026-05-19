@@ -243,10 +243,12 @@ the read-side.
   in a real deployment; v1 emits every match.
 - **No transitive resolution**. The SBOM is assumed flat (no
   dependency tree walking).
-- **`Fs.restrict_to("data/")` is a string-prefix check**.
-  A symlinked path or `data/../etc/passwd` traversal would
-  bypass the v1 attenuation. The Capa runtime ticket for
-  proper path canonicalisation tracks this.
+- **TOCTOU race on `Fs.restrict_to`**. The Capa runtime
+  canonicalises paths (via `os.path.realpath`) before
+  comparing, so `data/../etc/passwd` and symlinks pointing
+  outside the prefix are denied. A symlink swap between the
+  `allows()` check and the underlying `open()` is still
+  possible; closing it requires open-at-dirfd semantics.
 
 ## License
 
