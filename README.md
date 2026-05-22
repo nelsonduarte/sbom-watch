@@ -142,6 +142,17 @@ The three demos
 [audit-trail-reporter](https://github.com/nelsonduarte/audit-trail-reporter),
 and this one) now all run under both backends.
 
+The same source also builds as a Component Model `.wasm`
+artifact with the canonical-ABI lowering for every imported
+capability method (`Stdio`, `Fs`, `Env`, `Json`):
+
+```bash
+capa --wasm --component --output sbom_watch.wasm watch.capa
+```
+
+The resulting `.wasm` is consumable by any Component-Model-
+aware runtime and ships the WIT spec embedded in the binary.
+
 ## The audit story
 
 `capa --manifest watch.capa` shows the capability shape of
