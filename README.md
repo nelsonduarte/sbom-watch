@@ -129,15 +129,18 @@ capa --run watch.capa -- data/sbom.json --policy data/strict-policy.json
 
 ### Wasm backend
 
-`sbom-watch` does not yet build under `capa --wasm`. The
-Wasm path stops at `List<String>.contains` (license-rule
-matching) before reaching the wider stdlib shape. The
-companion demos
-[policy-eval](https://github.com/nelsonduarte/policy-eval) and
-[audit-trail-reporter](https://github.com/nelsonduarte/audit-trail-reporter)
-already exercise the Wasm backend; `sbom-watch` is gated on
-the Wasm side of `List<String>.contains` (and, longer term,
-on an `Http` capability binding for live CVE-feed lookups).
+The same source builds and runs end-to-end under Capa's
+WebAssembly backend, with bit-identical output to the Python
+reference path (3 critical, 3 high, 1 medium):
+
+```bash
+capa --wasm --run watch.capa -- data/sbom.json
+```
+
+The three demos
+([policy-eval](https://github.com/nelsonduarte/policy-eval),
+[audit-trail-reporter](https://github.com/nelsonduarte/audit-trail-reporter),
+and this one) now all run under both backends.
 
 ## The audit story
 
