@@ -127,6 +127,18 @@ capa --run watch.capa -- data/sbom.json --fail-threshold Critical
 capa --run watch.capa -- data/sbom.json --policy data/strict-policy.json
 ```
 
+### Wasm backend
+
+`sbom-watch` does not yet build under `capa --wasm`. The
+Wasm path stops at `List<String>.contains` (license-rule
+matching) before reaching the wider stdlib shape. The
+companion demos
+[policy-eval](https://github.com/nelsonduarte/policy-eval) and
+[audit-trail-reporter](https://github.com/nelsonduarte/audit-trail-reporter)
+already exercise the Wasm backend; `sbom-watch` is gated on
+the Wasm side of `List<String>.contains` (and, longer term,
+on an `Http` capability binding for live CVE-feed lookups).
+
 ## The audit story
 
 `capa --manifest watch.capa` shows the capability shape of
