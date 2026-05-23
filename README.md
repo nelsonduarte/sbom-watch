@@ -144,7 +144,7 @@ and this one) now all run under both backends.
 
 The same source also builds as a Component Model `.wasm`
 artifact with the canonical-ABI lowering for every imported
-capability method (`Stdio`, `Fs`, `Env`, `Json`):
+capability method (`Stdio`, `Fs`, `Env`):
 
 ```bash
 capa --wasm --component --output sbom_watch.wasm watch.capa
@@ -152,6 +152,17 @@ capa --wasm --component --output sbom_watch.wasm watch.capa
 
 The resulting `.wasm` is consumable by any Component-Model-
 aware runtime and ships the WIT spec embedded in the binary.
+
+And the artifact runs end-to-end under an external Component
+Model runtime via `capa --wasm --component --run`, with the
+same 7 findings (3 critical / 3 high / 1 medium) as the
+Python reference path. JSON is parsed entirely inside the
+guest module (Capa-source parser bundled into the artifact),
+so no `capa:host/json` import is emitted:
+
+```bash
+capa --wasm --component --run watch.capa -- data/sbom.json
+```
 
 ## The audit story
 
