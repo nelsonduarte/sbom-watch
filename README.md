@@ -164,6 +164,51 @@ so no `capa:host/json` import is emitted:
 capa --wasm --component --run watch.capa -- data/sbom.json
 ```
 
+### WASI Preview 2 (experimental, opt-in)
+
+The same source also builds as a stock **WASI Preview 2** component that
+runs on any WASI runtime without the Capa host. This is a CLI tool: the
+SBOM, CVE DB, policy, and output-dir paths all come from `env.args()`,
+so the operator must declare the filesystem authority the component may
+use, via `--preopen`.
+
+Which argv arguments actually reach the filesystem is a compiler-derived,
+by-construction fact you can print without running the program:
+
+```bash
+capa --wasi-surface watch.capa
+```
+
+```
+watch.capa: WASI path-arg surface (compiler-derived, by-construction):
+  argv[*] -> Fs.read (read-only)
+  argv[*] -> Fs.write (writes)
+```
+
+That proven argv-to-filesystem boundary is what tells the operator which
+directories to declare: the read paths (`sbom`, `--cve-db`, `--policy`)
+live under `data/`, the reports go to `--output-dir`. A single preopen
+of the repo root covers both:
+
+```bash
+mkdir -p out
+capa --wasm --component --wasi --preopen . --run watch.capa -- \
+  data/sbom.json --output-dir out
+```
+
+This produces the same 7 findings (3 critical / 3 high / 1 medium) and
+writes the markdown + JSON reports into `out/`, byte-for-byte identical
+to the Python reference and classic-backend paths (modulo line endings).
+Pass an explicit `--output-dir` under the preopen; the default output-dir
+resolves to a bare `./` prefix that the WASI preopen resolver rejects.
+
+The benefit: the component runs on any stock WASI runtime with no Capa
+host, the filesystem authority is materialized by the runtime through
+operator-declared preopens (not baked into the binary), and the
+argv-to-filesystem boundary that tells you what to preopen is an
+auditable compile-time fact rather than a claim in the docs. The
+`--wasi` path is experimental and opt-in.
+
 ## The audit story
 
 `capa --manifest watch.capa` shows the capability shape of
